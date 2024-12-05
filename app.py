@@ -197,7 +197,7 @@ def main():
                     help="Number of deleted words"
                 )
 
-        with st.expander("👀 View Changes", expanded=False):
+        with st.expander("👀 View Changes", expanded=True):
             st.markdown(highlight_differences(current_text, edited_text), unsafe_allow_html=True)
 
 def save_metrics(original: str, edited: str):
