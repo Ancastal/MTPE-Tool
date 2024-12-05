@@ -52,8 +52,12 @@ def init_session_state():
         st.session_state.start_time = None
 
 def load_css():
-    with open("../static/styles.css") as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    css_path = Path(__file__).parent / "static/styles.css"
+    if css_path.exists():
+        with open(css_path) as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    else:
+        st.error("CSS file not found.")
 
 def highlight_differences(original: str, edited: str) -> str:
     """Create HTML with highlighted differences"""
