@@ -6,11 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 import difflib
 import json
+from pymongo import AsyncMongoClient
+from datetime import datetime, timezone
+import pytz
+from time_tracker import TimeTracker
+import asyncio
 
 st.set_page_config(
     page_title="MT Post-Editing Tool",
     page_icon="🌍",
 )
+
+st.logo("static/unior-nlp.jpg", size="large", link=None, icon_image="static/unior-nlp.jpg")
 
 @dataclass
 class EditMetrics:
@@ -40,7 +47,7 @@ def load_segments(uploaded_file) -> List[str]:
     content = uploaded_file.getvalue().decode("utf-8")
     return [line.strip() for line in content.split('\n') if line.strip()]
 
-def init_session_state():
+async def init_session_state():
     """Initialize session state variables"""
     if 'current_segment' not in st.session_state:
         st.session_state.current_segment = 0
@@ -48,10 +55,24 @@ def init_session_state():
         st.session_state.segments = []
     if 'edit_metrics' not in st.session_state:
         st.session_state.edit_metrics = []
-    if 'start_time' not in st.session_state:
-        st.session_state.start_time = None
+    if 'segment_start_times' not in st.session_state:
+        st.session_state.segment_start_times = {}
+    if 'original_texts' not in st.session_state:
+        st.session_state.original_texts = {}
+    if 'user_name' not in st.session_state:
+        st.session_state.user_name = ""
+    if 'user_surname' not in st.session_state:
+        st.session_state.user_surname = ""
+    if 'time_tracker' not in st.session_state:
+        st.session_state.time_tracker = TimeTracker()
+    if 'active_segment' not in st.session_state:
+        st.session_state.active_segment = None
+    if 'last_saved' not in st.session_state:
+        st.session_state.last_saved = None
+    if 'auto_save' not in st.session_state:
+        st.session_state.auto_save = True
 
-def load_css():
+async def load_css():
     """Load and apply custom CSS styles"""
     with open("static/styles.css") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
@@ -72,11 +93,128 @@ def highlight_differences(original: str, edited: str) -> str:
     
     return ' '.join(html_parts)
 
+async def get_mongo_connection():
+    """Get MongoDB connection"""
+    connection_string = st.secrets["MONGO_CONNECTION_STRING"]
+    client = AsyncMongoClient(connection_string)
+    db = client['mtpe_database']
+    return db
+
+async def save_to_mongodb(user_name: str, user_surname: str, metrics_df: pd.DataFrame):
+    """Save metrics and full text to MongoDB"""
+    db = await get_mongo_connection()
+    collection = db['user_progress']
+    
+    # Convert DataFrame to dict and add user info
+    progress_data = {
+        'user_name': user_name,
+        'user_surname': user_surname,
+        'last_updated': datetime.now(),
+        'metrics': metrics_df.to_dict('records'),
+        'full_text': st.session_state.segments,
+        'time_tracker': st.session_state.time_tracker.to_dict()
+    }
+    
+    # Update or insert document
+    await collection.update_one(
+        {'user_name': user_name, 'user_surname': user_surname},
+        {'$set': progress_data},
+        upsert=True
+    )
+
+async def load_from_mongodb(user_name: str, user_surname: str) -> Tuple[pd.DataFrame, List[str]]:
+    """Load metrics and full text from MongoDB"""
+    db = await get_mongo_connection()
+    collection = db['user_progress']
+    
+    # Find user's progress
+    user_data = await collection.find_one({
+        'user_name': user_name,
+        'user_surname': user_surname
+    })
+    
+    if user_data and 'metrics' in user_data:
+        # Load time tracker if available
+        if 'time_tracker' in user_data:
+            st.session_state.time_tracker = TimeTracker.from_dict(user_data['time_tracker'])
+        return pd.DataFrame(user_data['metrics']), user_data.get('full_text', [])
+    return pd.DataFrame(), []
+
 def main():
-    load_css()
-    st.markdown("""
-        <h1 class='main-header pt-serif'>🌍 MT Post-Editing Tool</h1>
+    asyncio.run(load_css())
+    st.header("🌍 MT Post-Editing Tool")
+    asyncio.run(init_session_state())
+    
+    # Sidebar for user information
+    with st.sidebar:
+        st.text("Welcome to the MT Post-Editing Tool. Follow the instructions to get started.")
+        st.divider()
+        st.markdown("## 🧑‍💻 Tool Settings")
+        
+        # User Profile section
+        with st.container(border=True):   
+            user_name = st.text_input("**Name**", value=st.session_state.get('user_name', ''))
+            user_surname = st.text_input("**Surname**", value=st.session_state.get('user_surname', ''))
+            
+            if user_name and user_surname:
+                st.session_state.user_name = user_name
+                st.session_state.user_surname = user_surname
+                
+                # Add auto-save toggle
+                st.session_state.auto_save = st.toggle("Enable auto-save", value=st.session_state.auto_save)
+                
+                # Show last saved time if available
+                if st.session_state.last_saved:
+                    local_tz = pytz.timezone('Europe/Rome')  # Adjust timezone as needed
+                    local_time = st.session_state.last_saved.astimezone(local_tz)
+                    st.caption(f"Last saved: {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+
+                if st.button("💾 Save Progress", use_container_width=True):
+                    with st.spinner("Saving progress..."):
+                        df = pd.DataFrame([vars(m) for m in st.session_state.edit_metrics])
+                        asyncio.run(save_to_mongodb(user_name, user_surname, df))
+                        st.session_state.last_saved = datetime.now(timezone.utc)
+                        st.success("Progress saved!")
+            
+                if st.button("📂 Load Progress", use_container_width=True):
+                    with st.spinner("Loading previous work..."):
+                        existing_data, full_text = asyncio.run(load_from_mongodb(user_name, user_surname))
+                        
+                        if not existing_data.empty and full_text:
+                            st.session_state.edit_metrics = [
+                                EditMetrics(
+                                    segment_id=row['segment_id'],
+                                    original=row['original'],
+                                    edited=row['edited'],
+                                    edit_time=row['edit_time'],
+                                    insertions=row['insertions'],
+                                    deletions=row['deletions']
+                                )
+                                for _, row in existing_data.iterrows()
+                            ]
+                            
+                            st.session_state.segments = full_text
+                            last_edited_segment = max(row['segment_id'] for _, row in existing_data.iterrows())
+                            st.session_state.current_segment = last_edited_segment
+                            st.success("Previous work loaded!")
+                            st.rerun()
+                        else:
+                            st.info("No previous work found")
+            else:
+                st.info("⚠️ Enter your name and surname to enable progress tracking.")
+        
+        # Footer
+    st.sidebar.markdown("""
+        <div style='position: fixed; bottom: 0; width: 100%; text-align: center; padding: 10px; background: white;'>
+            <small style='color: #666;'>
+                Made with ❤️ by <a href="https://www.ancastal.com" target="_blank">Antonio Castaldo</a>
+            </small>
+        </div>
     """, unsafe_allow_html=True)
+        
+        
+    # Instructions 
     
     # Render header outside tabs
     st.markdown("""
@@ -86,14 +224,39 @@ def main():
             <p>My goal is to develop translation systems that can preserve style, tone, and creative elements while accurately conveying meaning across languages.</p>
             <p>Learn more about me at <a href="https://www.ancastal.com" target="_blank">www.ancastal.com</a></p>
         </div>
-        
-        <div class="info-card">
-            <p>💡 In order to <strong>get started</strong>, please upload a text file containing your translations.</p>
-        </div>
     """, unsafe_allow_html=True)
     
+    with st.expander("📖 Instructions", expanded=False):
+        st.markdown("##### Getting Started")
+        st.markdown("""
+        1. Enter your name and surname in the sidebar to enable progress tracking
+        2. Upload a text file containing one translation per line
+        3. Edit each segment to improve the translation quality
+        """)
+        
+        st.markdown("##### Navigation")
+        st.markdown("""
+        - Use the segment selector dropdown to jump to any segment
+        - Use the Previous/Next buttons to move between segments
+        - The progress bar shows your overall completion status
+        """)
+        
+        st.markdown("##### Features")
+        st.markdown("""
+        - 🔄 **Auto-save:** Your progress is automatically saved as you edit (when enabled)
+        - 📊 **Real-time metrics:** Track editing time, insertions, and deletions
+        - 👀 **Visual diff:** See your changes highlighted in real-time
+        - 💾 **Progress tracking:** Resume your work at any time
+        """)
+
+    st.markdown("""
+                <div class="info-card">
+                    <p class="pt-serif text-sm"><strong>Thanks for using my tool! 😊</strong></p>
+                    <p class="text-center text-muted">Feel free to send me an email for any feedback or suggestions.</p>
+                </div>
+                """, unsafe_allow_html=True)
     
-    init_session_state()
+    asyncio.run(init_session_state())
     
     # File upload with styled container
     with st.container():
@@ -108,6 +271,11 @@ def main():
     
     if not st.session_state.segments:
         return
+
+    # Check if we've completed all segments
+    if st.session_state.current_segment >= len(st.session_state.segments):
+        st.divider()
+        display_results()
     
     st.divider()
     
@@ -127,20 +295,53 @@ def main():
     # Display current segment with improved styling
     current_text = st.session_state.segments[st.session_state.current_segment]
     
+    # Check if this segment has already been edited
+    existing_edit = next(
+        (m for m in st.session_state.edit_metrics 
+         if m.segment_id == st.session_state.current_segment),
+        None
+    )
+    
     with st.container(border=True):
         # Source text with info styling
         st.markdown("**Original Text:**")
         st.info(current_text)
     
-        if st.session_state.start_time is None:
-            st.session_state.start_time = time.time()
+        # Find the most recent edit for this segment
+        most_recent_edit = None
+        for metric in reversed(st.session_state.edit_metrics):
+            if metric.segment_id == st.session_state.current_segment:
+                most_recent_edit = metric
+                break
         
-        # Edited text area with more height
+        # Use the most recent edit if available, otherwise use existing_edit or current_text
+        initial_value = (most_recent_edit.edited if most_recent_edit 
+                        else (existing_edit.edited if existing_edit 
+                              else current_text))
+        
+        # Store original text for comparison
+        if st.session_state.current_segment not in st.session_state.original_texts:
+            st.session_state.original_texts[st.session_state.current_segment] = initial_value
+        
+        if st.session_state.current_segment != st.session_state.active_segment:
+            # Pause previous segment if exists
+            if st.session_state.active_segment is not None:
+                st.session_state.time_tracker.pause_segment(st.session_state.active_segment)
+            # Start or resume new segment
+            st.session_state.time_tracker.start_segment(st.session_state.current_segment)
+            st.session_state.time_tracker.resume_segment(st.session_state.current_segment)
+            st.session_state.active_segment = st.session_state.current_segment
+        
         edited_text = st.text_area(
-            "Edit Translation:",  # Move label back into text_area
-            value=current_text,
-            key="edit_area",
+            "Edit Translation:",
+            value=initial_value,
+            key=f"edit_area_{st.session_state.current_segment}"
         )
+        
+        # Start timing when text changes
+        if edited_text != st.session_state.original_texts[st.session_state.current_segment]:
+            if st.session_state.current_segment not in st.session_state.time_tracker.sessions:
+                st.session_state.time_tracker.start_segment(st.session_state.current_segment)
     
     # Navigation buttons with emojis and improved layout
     col1, col2 = st.columns(2)
@@ -149,31 +350,35 @@ def main():
                     key="prev_segment", 
                     disabled=st.session_state.current_segment == 0):
             save_metrics(current_text, edited_text)
+            st.session_state.time_tracker.pause_segment(st.session_state.current_segment)
             st.session_state.current_segment -= 1
-            st.session_state.start_time = None
             st.rerun()
     
     with col2:
-        if st.button("Next ➡️", 
-                    key="next_segment",
-                    disabled=st.session_state.current_segment >= len(st.session_state.segments)):
-            save_metrics(current_text, edited_text)
-            st.session_state.current_segment += 1
-            st.session_state.start_time = None
-            
-            # If we've processed all segments, show results
-        if st.session_state.current_segment >= len(st.session_state.segments):
-            display_results()
-
-
+        # Check if we're on the last segment
+        is_last_segment = st.session_state.current_segment == len(st.session_state.segments) - 1
+        
+        if is_last_segment:
+            if st.button("🎉 Finish", key="finish_button", type="primary"):
+                save_metrics(current_text, edited_text)
+                st.session_state.time_tracker.pause_segment(st.session_state.current_segment)
+                st.session_state.current_segment += 1
+                st.rerun()
+        else:
+            if st.button("Next ➡️", key="next_segment"):
+                save_metrics(current_text, edited_text)
+                st.session_state.time_tracker.pause_segment(st.session_state.current_segment)
+                st.session_state.current_segment += 1
+                st.rerun()
+                
     # Show editing statistics in expander
-    if edited_text != current_text:
+    if st.session_state.current_segment in st.session_state.time_tracker.sessions:
         st.divider()
         with st.expander("📊 Post-Editing Statistics", expanded=True):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                edit_time = time.time() - st.session_state.start_time
+                edit_time = st.session_state.time_tracker.get_editing_time(st.session_state.current_segment)
                 minutes = int(edit_time // 60)
                 seconds = int(edit_time % 60)
                 st.metric(
@@ -202,10 +407,10 @@ def main():
 
 def save_metrics(original: str, edited: str):
     """Save metrics for the current segment"""
-    if st.session_state.start_time is None:
+    if edited == st.session_state.original_texts.get(st.session_state.current_segment, original):
         return
         
-    edit_time = time.time() - st.session_state.start_time
+    edit_time = st.session_state.time_tracker.get_editing_time(st.session_state.current_segment)
     insertions, deletions = calculate_edit_distance(original, edited)
     
     metrics = EditMetrics(
@@ -217,12 +422,20 @@ def save_metrics(original: str, edited: str):
         deletions=deletions
     )
     
+    st.session_state.edit_metrics = [m for m in st.session_state.edit_metrics 
+                                   if m.segment_id != st.session_state.current_segment]
     st.session_state.edit_metrics.append(metrics)
+    
+    # Auto-save if enabled and user info is available
+    if (st.session_state.get('auto_save', False) and 
+        st.session_state.get('user_name') and 
+        st.session_state.get('user_surname')):
+        df = pd.DataFrame([vars(m) for m in st.session_state.edit_metrics])
+        asyncio.run(save_to_mongodb(st.session_state.user_name, st.session_state.user_surname, df))
+        st.session_state.last_saved = datetime.now(timezone.utc)
 
 def display_results():
     """Display final results and statistics"""
-    st.markdown("<h2 class='pt-serif'>Post-editing completed! 🎉</h2>", unsafe_allow_html=True)
-    
     # Convert metrics to DataFrame for easy analysis
     df = pd.DataFrame([vars(m) for m in st.session_state.edit_metrics])
     
@@ -237,17 +450,22 @@ def display_results():
     with col3:
         st.metric("Avg. Time/Segment", f"{df['edit_time'].mean():.1f}s")
     
-    col4, col5 = st.columns(2)
+    col4, col5, col6 = st.columns(3)
     with col4:
         st.metric("Total Insertions", int(df['insertions'].sum()))
     with col5:
         st.metric("Total Deletions", int(df['deletions'].sum()))
+    with col6:
+        st.metric("Total Edits", int(df['insertions'].sum() + df['deletions'].sum()))
     
     # Display detailed metrics
+    st.divider()
     st.markdown("### Detailed Metrics", unsafe_allow_html=True)
     st.dataframe(df, use_container_width=True)
     
     # Download buttons
+    st.divider()
+    st.markdown("### Download Results", unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     
     with col1:
@@ -256,7 +474,8 @@ def display_results():
             label="📥 Download metrics as CSV",
             data=csv,
             file_name="post_editing_metrics.csv",
-            mime="text/csv"
+            mime="text/csv",
+            use_container_width=True
         )
     
     with col2:
@@ -277,9 +496,17 @@ def display_results():
             label="📥 Download segments as JSON",
             data=json_str,
             file_name="post_edited_segments.json",
-            mime="application/json"
+            mime="application/json",
+            use_container_width=True
         )
+        
+    st.divider()
+    st.markdown("""
+                <div class="info-card">
+                    <p><strong>Thanks for using my tool! 😊</strong></p>   
+                    <p>Feel free to send me an email for any feedback or suggestions.</p>
+                </div>
+        """, unsafe_allow_html=True)
     
-
 if __name__ == "__main__":
     main()
