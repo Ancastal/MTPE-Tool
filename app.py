@@ -19,6 +19,14 @@ st.set_page_config(
 
 st.logo("static/unior-nlp.jpg", size="large", link=None, icon_image="static/unior-nlp.jpg")
 
+hide_st_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+"""
+
 @dataclass
 class EditMetrics:
     """Class to store metrics for each segment edit"""
