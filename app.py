@@ -147,8 +147,8 @@ def main():
     
     # Sidebar for user information
     with st.sidebar:
-        st.text("Welcome to the *MT Post-Editing Tool*.") 
-        st.text("➦ Follow the instructions to get started.\n➦ Enter name and surname below.")
+        st.write("Welcome to the **MT Post-Editing Tool**.") 
+        st.write("➦ Follow the instructions to get started.\n➦ Enter name and surname below.")
         st.divider()
         st.markdown("## 🧑‍💻 Tool Settings")
         
