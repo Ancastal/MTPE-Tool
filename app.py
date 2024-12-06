@@ -27,6 +27,8 @@ hide_st_style = """
     </style>
 """
 
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 @dataclass
 class EditMetrics:
     """Class to store metrics for each segment edit"""
