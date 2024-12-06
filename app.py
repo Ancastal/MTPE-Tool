@@ -158,7 +158,6 @@ def main():
     # Sidebar for user information
     with st.sidebar:
         st.write("Welcome to the **MT Post-Editing Tool**.") 
-        st.write("---")
         st.markdown("## 🧑‍💻 Tool Settings")
         st.text("➦ Follow the instructions to get started.\n➦ Enter name and surname below.")
 
