@@ -17,7 +17,7 @@ st.set_page_config(
     page_icon="🌍",
 )
 
-st.logo("static/unior-nlp.jpg", size="large", link=None, icon_image="static/unior-nlp.jpg")
+st.logo("static/unior-nlp.png", size="large", link=None, icon_image="static/unior-nlp.jpg")
 
 hide_st_style = """
     <style>
