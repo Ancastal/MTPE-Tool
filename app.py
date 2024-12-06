@@ -203,7 +203,7 @@ def main():
                         else:
                             st.info("No previous work found")
             else:
-                st.error("Enter your name and surname to enable progress tracking.")
+                st.error("Enter your name and surname.")
         
         # Footer
     st.sidebar.markdown("""
